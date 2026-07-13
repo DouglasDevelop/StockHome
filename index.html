@@ -1112,34 +1112,70 @@ async function handleFile(file){
 /* ================= Barcode scanning ================= */
 const hasDetector = "BarcodeDetector" in window;
 let detector = null;
+let zxingReader = null;
+let zxingLoading = null;
+
+/* ZXing fallback for browsers without the native BarcodeDetector API (all iOS browsers) */
+function loadZXing(){
+  if(window.ZXing) return Promise.resolve();
+  if(zxingLoading) return zxingLoading;
+  zxingLoading = new Promise((resolve, reject)=>{
+    const s = document.createElement("script");
+    s.src = "https://cdn.jsdelivr.net/npm/@zxing/library@0.21.3/umd/index.min.js";
+    s.onload = resolve;
+    s.onerror = () => { zxingLoading = null; reject(new Error("zxing-load-failed")); };
+    document.head.appendChild(s);
+  });
+  return zxingLoading;
+}
 
 async function openScanner(target){
   scanTarget = target;
-  if(!hasDetector){
-    toast("Your browser doesn't support barcode scanning — enter the code manually.");
-    return;
-  }
-  if(!detector){
-    try{
-      detector = new BarcodeDetector({formats:["ean_13","ean_8","upc_a","upc_e","code_128"]});
-    }catch(e){
-      toast("Couldn't start the barcode scanner.");
-      return;
-    }
-  }
   $("scanOverlay").classList.add("open");
   $("scanStatus").textContent = "Starting camera…";
   try{
-    scanStream = await navigator.mediaDevices.getUserMedia({
-      video:{ facingMode:"environment" }, audio:false
-    });
-    const video = $("scanVideo");
-    video.srcObject = scanStream;
-    await video.play();
-    $("scanStatus").textContent = "Point the camera at the barcode…";
-    scanLoop();
+    if(hasDetector){
+      if(!detector){
+        detector = new BarcodeDetector({formats:["ean_13","ean_8","upc_a","upc_e","code_128"]});
+      }
+      scanStream = await navigator.mediaDevices.getUserMedia({
+        video:{ facingMode:"environment" }, audio:false
+      });
+      const video = $("scanVideo");
+      video.srcObject = scanStream;
+      await video.play();
+      $("scanStatus").textContent = "Point the camera at the barcode…";
+      scanLoop();
+    } else {
+      $("scanStatus").textContent = "Loading scanner…";
+      await loadZXing();
+      const hints = new Map();
+      hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [
+        ZXing.BarcodeFormat.EAN_13, ZXing.BarcodeFormat.EAN_8,
+        ZXing.BarcodeFormat.UPC_A, ZXing.BarcodeFormat.UPC_E,
+        ZXing.BarcodeFormat.CODE_128
+      ]);
+      hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
+      zxingReader = new ZXing.BrowserMultiFormatReader(hints);
+      scanStream = await navigator.mediaDevices.getUserMedia({
+        video:{ facingMode:"environment" }, audio:false
+      });
+      const video = $("scanVideo");
+      $("scanStatus").textContent = "Point the camera at the barcode…";
+      await zxingReader.decodeFromStream(scanStream, video, (result) => {
+        if(result){
+          const code = result.getText();
+          closeScanner();
+          onBarcode(code);
+        }
+      });
+    }
   }catch(e){
-    $("scanStatus").textContent = "The camera couldn't start. Allow camera access and try again.";
+    if(String(e && e.message).includes("zxing-load-failed")){
+      $("scanStatus").textContent = "Couldn't load the scanner. Check your connection and try again.";
+    } else {
+      $("scanStatus").textContent = "The camera couldn't start. Allow camera access and try again.";
+    }
   }
 }
 
@@ -1161,6 +1197,10 @@ function scanLoop(){
 function closeScanner(){
   clearInterval(scanTimer);
   scanTimer = null;
+  if(zxingReader){
+    try{ zxingReader.reset(); }catch(e){}
+    zxingReader = null;
+  }
   if(scanStream){
     scanStream.getTracks().forEach(t=>t.stop());
     scanStream = null;
